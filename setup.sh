@@ -6,14 +6,13 @@
 set -euo pipefail
 
 # --- Configuration Variables ---
-# We'll add more here as we progress.
 DOTFILES_REPO="https://github.com/ScottWiedemann/.dotfiles.git"
 DOTFILES_DIR="$HOME/.dotfiles"
 BACKUP_DIR_BASE="$HOME/.dotfiles_backups"
+FORCE_NON_INTERACTIVE=false
 
 # --- Helper Functions ---
 
-# Functions to print messages with different colors
 log_info() {
     echo -e "\033[0;32m[INFO]\033[0m $1"
 }
@@ -24,10 +23,8 @@ log_warn() {
 
 log_error() {
     echo -e "\033[0;31m[ERROR]\033[0m $1"
-    exit 1
 }
 
-# Function to check if a command exists
 check_command() {
     if ! command -v "$1" &> /dev/null; then
         log_error "'$1' is not installed. Please install it to proceed."
@@ -35,8 +32,13 @@ check_command() {
     log_info "'$1' command found."
 }
 
-# Function to ask for user confirmation
 confirm_action() {
+    if "$FORCE_NON_INTERACTIVE"; then
+        log_info "Non-interactive mode: Auto-confirming '$1'."
+        true
+        return
+    fi
+
     read -r -p "$1 (y/N): " response
     case "$response" in
         [yY][eE][sS]|[yY])
@@ -48,22 +50,65 @@ confirm_action() {
     esac
 }
 
-# --- Main Script Logic (Placeholder) ---
-main() {
-    log_info "Starting setup script..."
+# --- Core Logic Functions ---
 
-    # Initial checks
+_setup() {
+    log_info "Executing setup process..."
+    log_warn "Setup logic not yet implemented."
+}
+
+_takedown() {
+    log_info "Executing takedown process..."
+    log_warn "Takedown logic not yet implemented."
+}
+
+usage() {
+    echo "Usage: $0 [ --setup | --takedown ] [ --force ]"
+    echo "  --setup    : Run the setup process."
+    echo "  --takedown : Run the takedown process."
+    echo "  --force    : Run in non-interactive mode (auto-confirms all prompts)."
+    exit 1
+}
+
+# --- Main Script Logic ---
+main() {
+    log_info "Starting environment management script..."
+
+    local action=""
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --setup)
+                action="setup"
+                ;;
+            --takedown)
+                action="takedown"
+                ;;
+            --force)
+                FORCE_NON_INTERACTIVE=true
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                usage
+                ;;
+        esac
+        shift
+    done
+
+    if [ "$action" = "" ]; then
+        log_error "No action specified (--setup or --takedown)."
+        usage
+    fi
+
     check_command "git"
 
-    # Placeholder for actual setup/takedown logic
-    if confirm_action "Do you want to proceed with a dummy action?"; then
-        log_info "Dummy action confirmed. Doing nothing for now."
-    else
-        log_info "Dummy action cancelled. Exiting."
+    if [ "$action" == "setup" ]; then
+        _setup
+    elif [ "$action" == "takedown" ]; then
+        _takedown
     fi
 
     log_info "Script finished."
 }
 
-# Call the main function
 main "$@"
