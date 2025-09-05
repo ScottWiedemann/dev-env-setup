@@ -241,6 +241,81 @@ _setup_git_ssh() {
     log_info "Git SSH setup complete."
 }
 
+# --- Dotfile Alias Setup ---
+_setup_dot_alias() {
+    log_info "Configuring 'dot' alias for Git bare repository..."
+
+    local alias_name="dot"
+    local alias_command="git --git-dir=\"$DOTFILES_DIR\" --work-tree=\"$HOME\""
+    local alias_full_string="alias $alias_name=\"$alias_command\""
+
+    local shell_rc_file=""
+    if [ -f "$HOME/.zshrc" ]; then
+        shell_rc_file="$HOME/.zshrc"
+        log_info "Detected Zsh, targeting '$shell_rc_file'."
+    elif [ -f "$HOME/.bashrc" ]; then
+        shell_rc_file="$HOME/.bashrc"
+        log_info "Detected Bash, targeting '$shell_rc_file'."
+    else
+        log_warn "Could not detect common shell config file (.zshrc or .bashrc)."
+        log_warn "Please manually add the following alias to your shell's config file:"
+        log_warn "  $alias_full_string"
+        return 0
+    fi
+
+    if grep -q "alias ${alias_name}=" "$shell_rc_file"; then
+        log_info "Alias '$alias_name' already exists in '$shell_rc_file'."
+    else
+        log_warn "Alias '$alias_name' not found in '$shell_rc_file'."
+        if confirm_action "Add alias '$alias_name' to '$shell_rc_file' for easier dotfile management?"; then
+            log_info "Appending alias to '$shell_rc_file'..."
+            if ! printf "\n# Alias for dotfiles bare repository\n%s\n" "$alias_full_string" >> "$shell_rc_file"; then
+                log_error "Failed to append alias to '$shell_rc_file'."
+                exit 1
+            fi
+            log_info "Alias added. Please 'source $shell_rc_file' or restart your terminal for it to take effect."
+        else
+            log_info "Skipping alias '$alias_name' creation."
+        fi
+    fi
+    log_info "Dotfiles alias configuration complete."
+}
+
+_takedown_dot_alias() {
+    log_info "Removing 'dot' alias from shell configuration..."
+
+    local alias_name="dot"
+    local alias_comment_regex="^# Alias for dotfiles bare repository$"
+
+    local shell_rc_file=""
+    if [ -f "$HOME/.zshrc" ]; then
+        shell_rc_file="$HOME/.zshrc"
+        log_info "Detected Zsh, targeting '$shell_rc_file'."
+    elif [ -f "$HOME/.bashrc" ]; then
+        shell_rc_file="$HOME/.bashrc"
+        log_info "Detected Bash, targeting '$shell_rc_file'."
+    else
+        log_warn "Could not detect common shell config file (.zshrc or .bashrc). Skipping alias removal."
+        return 0
+    fi
+
+    if grep -q "${alias_name}=" "$shell_rc_file"; then
+        if confirm_action "Remove alias '$alias_name' and its comment from '$shell_rc_file'?"; then
+            log_info "Removing alias from '$shell_rc_file'..."
+            if ! sed -i "/${alias_comment_regex}/ { N; d; }" "$shell_rc_file"; then
+                log_warn "Failed to remove alias '$alias_name' and/or its comment. Manual cleanup may be required in '$shell_rc_file'."
+            else
+                log_info "Alias '$alias_name' and its comment removed from '$shell_rc_file'."
+            fi
+        else
+            log_info "Skipping alias '$alias_name' removal."
+        fi
+    else
+        log_info "Alias '$alias_name' not found in '$shell_rc_file', no removal needed."
+    fi
+    log_info "'dot' alias takedown complete."
+}
+
 # Function to get a list of dotfiles from the bare repo
 _get_repo_dotfiles() {
     git --git-dir="$DOTFILES_DIR" ls-tree -r main --name-only | \
@@ -321,10 +396,14 @@ _manage_dotfiles_setup() {
         exit 1
     fi
     log_info "Backup directory '$current_backup_dir' recorded in manifest."
+
+    _setup_dot_alias
 }
 
 _manage_dotfiles_takedown() {
     log_info "Beginning dotfiles takedown process..."
+
+    _takedown_dot_alias
 
     if [ ! -d "$DOTFILES_DIR" ]; then
         log_warn "Dotfiles bare repository not found at '$DOTFILES_DIR'. Skipping dotfile takedown."
