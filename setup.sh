@@ -76,6 +76,28 @@ _backup_item() {
         log_info "'$source_path' does not exist, no backup needed."
     fi
 }
+
+_restore_item() {
+    local backup_source_path="$1"
+    local restore_target_path="$2"
+
+    if [ -e "$backup_source_path" ]; then
+        log_info "Restoring '$backup_source_path' to '$restore_target_path'..."
+        if ! mkdir -p "$(dirname "$restore_target_path")"; then
+          log_error "Failed to create directory for restoring '$restore_target_path'."
+          exit 1
+        fi
+
+        if ! mv "$backup_source_path" "$restore_target_path"; then
+          log_error "Failed to move '$backup_source_path' to '$restore_target_path'." 
+          exit 1
+        fi
+        log_info "Restored '$restore_target_path'."
+    else
+        log_warn "Backup item '$backup_source_path' not found, skipping restore for '$restore_target_path'."
+    fi
+}
+
 # --- OS Detection Function ---
 _detect_os() {
     log_info "Detecting operating system..."
@@ -148,8 +170,14 @@ _detect_os() {
     log_info "OS detection complete. Package manager: $PACKAGE_MANAGER_CMD"
 }
 
+# Function to get a list of dotfiles from the bare repo
+_get_repo_dotfiles() {
+    git --git-dir="$DOTFILES_DIR" ls-tree -r main --name-only | \
+    grep -vE "^(\.git(ignore)?|\.mailmap|\.DS_Store|README\.md|LICENSE)$"
+}
+
 # --- Dotfiles Management Function ---
-_manage_dotfiles() {
+_manage_dotfiles_setup() {
     log_info "Managing dotfiles from $DOTFILES_REPO..."
 
     local current_backup_dir="$BACKUP_DIR_BASE/$(date +%Y%m%d%H%M%S)"
@@ -188,11 +216,6 @@ _manage_dotfiles() {
     fi
     log_info "Git config 'status.showUntrackedFiles no' applied."
 
-    _get_repo_dotfiles() {
-        git --git-dir="$DOTFILES_DIR" ls-tree -r main --name-only | \
-        grep -vE "^(\.git(ignore)?|\.mailmap|\.DS_Store|README\.md|LICENSE)$"
-    }
-
     log_info "Preparing to deploy dotfiles. Existing files will be backed up."
 
     while IFS= read -r dotfile; do
@@ -229,18 +252,120 @@ _manage_dotfiles() {
     log_info "Backup directory '$current_backup_dir' recorded in manifest."
 }
 
+_manage_dotfiles_takedown() {
+    log_info "Beginning dotfiles takedown process..."
+
+    if [ ! -d "$DOTFILES_DIR" ]; then
+        log_warn "Dotfiles bare repository not found at '$DOTFILES_DIR'. Skipping dotfile takedown."
+        return 0
+    fi
+
+    local last_backup_dir=""
+    if [ -f "$BACKUP_DIR_BASE/manifest.log" ]; then
+        last_backup_dir=$(tail -n 1 "$BACKUP_DIR_BASE/manifest.log")
+        if [ "$last_backup_dir" = "" ]; then
+            log_warn "Manifest log '$BACKUP_DIR_BASE/manifest.log' is empty or corrupt. Cannot determine last backup to restore."
+        elif [ ! -d "$last_backup_dir" ]; then
+            log_warn "Last recorded backup directory '$last_backup_dir' does not exist. Cannot restore original dotfiles."
+            last_backup_dir=""
+        fi
+    else
+        log_warn "Dotfiles backup manifest not found at '$BACKUP_DIR_BASE/manifest.log'. Cannot restore original dotfiles."
+    fi
+
+    log_info "Removing deployed dotfiles from $HOME..."
+    while IFS= read -r dotfile; do
+        local full_path="$HOME/$dotfile"
+        if [ -e "$full_path" ]; then
+            log_info "Removing '$full_path'."
+            if ! rm -rf "$full_path"; then
+                log_error "Failed to remove '$full_path'."
+                exit 1
+            fi
+        else
+            log_info "Dotfile '$full_path' not found in HOME, skipping removal."
+        fi
+    done < <(_get_repo_dotfiles)
+    log_info "Deployed dotfiles removed from $HOME."
+
+    if [ "$last_backup_dir" != "" ]; then
+        log_info "Restoring original dotfiles from '$last_backup_dir'..."
+
+        if find "$last_backup_dir" -type f -print0 | while IFS= read -r -d '' backup_file; do
+            local relative_path="${backup_file#$last_backup_dir/}"
+            local original_path="$HOME/$relative_path"
+            _restore_item "$backup_file" "$original_path"
+        done; then
+            log_info "Files restored successfully."
+        else
+            log_error "Failed to restore some files from '$last_backup_dir'."
+            exit 1
+        fi
+
+        if find "$last_backup_dir" -mindepth 1 -maxdepth 1 -type d -print0 | while IFS= read -r -d '' backup_dir; do
+            local relative_path="${backup_dir#$last_backup_dir/}"
+            local original_path="$HOME/$relative_path"
+            _restore_item "$backup_dir" "$original_path"
+        done; then
+            log_info "Directories restored successfully."
+        else
+            log_error "Failed to restore some directories from '$last_backup_dir'."
+            exit 1
+        fi
+
+        log_info "Original dotfiles restored from '$last_backup_dir'."
+
+        if confirm_action "Delete the backup directory '$last_backup_dir'? (Recommended for clean takedown)"; then
+            log_info "Removing backup directory '$last_backup_dir'..."
+            if ! rm -rf "$last_backup_dir"; then
+                log_error "Failed to remove backup directory '$last_backup_dir'."
+                exit 1
+            fi
+
+            if ! sed -i '$d' "$BACKUP_DIR_BASE/manifest.log"; then
+                log_warn "Failed to remove last entry from manifest.log. Manual cleanup may be required."
+            fi
+            log_info "Backup directory '$last_backup_dir' removed."
+        else
+            log_info "Skipping deletion of backup directory '$last_backup_dir'."
+        fi
+    else
+        log_warn "No valid backup directory found/specified for restoration. User-specific dotfiles in $HOME were removed, but no original files were restored."
+    fi
+
+    if confirm_action "Delete the dotfiles bare repository '$DOTFILES_DIR'? (Recommended for clean takedown)"; then
+        log_info "Removing dotfiles bare repository '$DOTFILES_DIR'..."
+        if ! rm -rf "$DOTFILES_DIR"; then
+            log_error "Failed to remove dotfiles bare repository."
+            exit 1
+        fi
+
+        if [ -f "$BACKUP_DIR_BASE/manifest.log" ] && [ ! -s "$BACKUP_DIR_BASE/manifest.log" ]; then
+            if ! rm -f "$BACKUP_DIR_BASE/manifest.log"; then
+                log_warn "Failed to remove empty manifest.log."
+            fi
+        fi
+        log_info "Dotfiles bare repository removed."
+    else
+        log_info "Skipping deletion of dotfiles bare repository."
+    fi
+
+    log_info "Dotfiles takedown complete."
+}
+
 # --- Core Logic Functions ---
 
 _setup() {
     log_info "Executing setup process..."
     _detect_os
-    _manage_dotfiles
+    _manage_dotfiles_setup
     log_warn "Setup logic not yet implemented."
 }
 
 _takedown() {
     log_info "Executing takedown process..."
     _detect_os
+    _manage_dotfiles_takedown
     log_warn "Takedown logic not yet implemented."
 }
 
