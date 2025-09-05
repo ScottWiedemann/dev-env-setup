@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # --- Configuration Variables ---
-DOTFILES_REPO="https://github.com/ScottWiedemann/.dotfiles.git"
+DOTFILES_REPO="git@github.com:ScottWiedemann/.dotfiles.git"
 DOTFILES_DIR="$HOME/.dotfiles"
 BACKUP_DIR_BASE="$HOME/.dotfiles_backups"
 FORCE_NON_INTERACTIVE=false
@@ -168,6 +168,77 @@ _detect_os() {
     fi
 
     log_info "OS detection complete. Package manager: $PACKAGE_MANAGER_CMD"
+}
+
+# --- Git SSH Setup Function ---
+_setup_git_ssh() {
+    log_info "Setting up Git SSH authentication..."
+
+    check_command "ssh-keygen"
+    check_command "ssh-agent"
+    check_command "ssh-add"
+
+    local ssh_key_path="$HOME/.ssh/id_ed25519"
+    local old_ssh_key_path="$HOME/.ssh/id_rsa"
+
+    if [ -f "$ssh_key_path" ]; then
+        log_info "SSH key '$ssh_key_path' already exists."
+    elif [ -f "$old_ssh_key_path" ]; then
+        log_warn "Older SSH key '$old_ssh_key_path' found. Consider generating a new 'id_ed25519' key for better security."
+        ssh_key_path="$old_ssh_key_path"
+    else
+        log_warn "No SSH key found. Generating a new ED25519 key at '$ssh_key_path'."
+        if ! confirm_action "Generate a new SSH key now?"; then
+            log_error "SSH key generation cancelled. Git operations will likely fail without an SSH key."
+            exit 1
+        fi
+        log_info "Running 'ssh-keygen -t ed25519 -f \"$ssh_key_path\" -C \"$(whoami)@$(hostname)-dotfiles\"'."
+        if ! ssh-keygen -t ed25519 -f "$ssh_key_path" -C "$(whoami)@$(hostname)-dotfiles"; then
+            log_error "Failed to generate SSH key."
+            exit 1
+        fi
+        log_info "SSH key generated. Remember your passphrase if you set one."
+    fi
+
+    log_info "Ensuring SSH agent is running and key is loaded..."
+
+    if ! pgrep -q "ssh-agent"; then
+        log_info "SSH agent not running, starting it."
+        eval "$(ssh-agent -s)" || log_error "Failed to start ssh-agent." && exit 1
+        log_info "SSH agent started."
+    else
+        log_info "SSH agent already running."
+    fi
+
+    if ! ssh-add -l | grep -q "$(ssh-keygen -lf "$ssh_key_path" | awk '{print $2}')"; then
+        log_info "Adding SSH key '$ssh_key_path' to agent."
+        if ! ssh-add "$ssh_key_path"; then
+            log_error "Failed to add SSH key to agent. Make sure you entered the correct passphrase if applicable."
+            exit 1
+        fi
+        log_info "SSH key added to agent."
+    else
+        log_info "SSH key '$ssh_key_path' already loaded in agent."
+    fi
+
+    local public_key_file="$ssh_key_path.pub"
+    if [ -f "$public_key_file" ]; then
+        log_warn "IMPORTANT: Please add the following public SSH key to your GitHub account settings."
+        log_warn "Go to GitHub -> Settings -> SSH and GPG keys -> New SSH key."
+        log_warn "Copy the content of this file and paste it there:"
+        log_info "--------------------------------------------------------------------------------"
+        cat "$public_key_file"
+        log_info "--------------------------------------------------------------------------------"
+        if ! confirm_action "Have you added the public SSH key to GitHub? (Crucial for next steps)"; then
+            log_error "Public SSH key not added to GitHub. Git operations may fail. Exiting."
+            exit 1
+        fi
+    else
+        log_error "Public SSH key file '$public_key_file' not found. Cannot provide key for GitHub."
+        exit 1
+    fi
+
+    log_info "Git SSH setup complete."
 }
 
 # Function to get a list of dotfiles from the bare repo
