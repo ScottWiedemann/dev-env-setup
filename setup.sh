@@ -56,6 +56,26 @@ confirm_action() {
     esac
 }
 
+# Function to safely move a file/directory to a backup location
+_backup_item() {
+    local source_path="$1"
+    local backup_path="$2"
+
+    if [ -e "$source_path" ]; then # Check if the source exists
+        log_warn "Backing up existing '$source_path' to '$backup_path'..."
+        if ! mkdir -p "$(dirname "$backup_path")"; then
+            log_error "Failed to create backup directory for '$source_path'."
+            exit 1
+        fi
+        if ! mv "$source_path" "$backup_path"; then
+            log_error "Failed to move '$source_path' to '$backup_path'."
+            exit 1
+        fi
+        log_info "Backed up '$source_path'."
+    else
+        log_info "'$source_path' does not exist, no backup needed."
+    fi
+}
 # --- OS Detection Function ---
 _detect_os() {
     log_info "Detecting operating system..."
@@ -128,11 +148,93 @@ _detect_os() {
     log_info "OS detection complete. Package manager: $PACKAGE_MANAGER_CMD"
 }
 
+# --- Dotfiles Management Function ---
+_manage_dotfiles() {
+    log_info "Managing dotfiles from $DOTFILES_REPO..."
+
+    local current_backup_dir="$BACKUP_DIR_BASE/$(date +%Y%m%d%H%M%S)"
+    log_info "Current backup directory for this run: $current_backup_dir"
+
+    if [ -d "$DOTFILES_DIR" ]; then
+        log_info "Dotfiles bare repository already exists. Updating..."
+        local git_pull_output
+        local git_pull_exit_code
+        git_pull_output=$(git --git-dir="$DOTFILES_DIR" --work-tree="$HOME" pull origin main 2>&1)
+        git_pull_exit_code=$?
+
+        if [ "$git_pull_exit_code" -ne 0 ]; then
+            if echo "$git_pull_output" | grep -q "Already up to date."; then
+                log_info "Dotfiles repository is already up to date."
+            else
+                log_error "Failed to pull dotfiles. Output:\n$git_pull_output"
+                exit 1
+            fi
+        else
+            log_info "Dotfiles repository updated successfully."
+        fi
+    else
+        log_info "Cloning dotfiles bare repository..."
+        if ! git clone --bare "$DOTFILES_REPO" "$DOTFILES_DIR"; then
+            log_error "Failed to clone dotfiles repository."
+            exit 1
+        fi
+        log_info "Dotfiles bare repository cloned to $DOTFILES_DIR."
+    fi
+
+    log_info "Configuring Git for bare repository..."
+    if ! git --git-dir="$DOTFILES_DIR" config status.showUntrackedFiles no; then
+        log_error "Failed to configure Git with 'status.showUntrackedFiles no'."
+        exit 1
+    fi
+    log_info "Git config 'status.showUntrackedFiles no' applied."
+
+    _get_repo_dotfiles() {
+        git --git-dir="$DOTFILES_DIR" ls-tree -r main --name-only | \
+        grep -vE "^(\.git(ignore)?|\.mailmap|\.DS_Store|README\.md|LICENSE)$"
+    }
+
+    log_info "Preparing to deploy dotfiles. Existing files will be backed up."
+
+    while IFS= read -r dotfile; do
+        echo "$dotfile"
+        local full_path="$HOME/$dotfile"
+        local backup_path="$current_backup_dir/$dotfile"
+
+        if [ -e "$full_path" ]; then
+            log_info "Detected existing $full_path."
+            _backup_item "$full_path" "$backup_path"
+        fi
+    done < <(_get_repo_dotfiles)
+
+    log_info "Checking out dotfiles into $HOME..."
+    if confirm_action "This will overwrite existing dotfiles in your home directory with your repository's versions. Proceed?"; then
+        if ! git --git-dir="$DOTFILES_DIR" --work-tree="$HOME" checkout main --force; then
+            log_error "Failed to checkout dotfiles."
+            exit 1
+        fi
+        log_info "Dotfiles deployed to $HOME."
+    else
+        log_warn "Dotfile checkout cancelled by user. Dotfiles may not be fully deployed. Exiting."
+        exit 1
+    fi
+
+    if ! mkdir -p "$BACKUP_DIR_BASE"; then
+        log_error "Failed to create base backup directory '$BACKUP_DIR_BASE'."
+        exit 1
+    fi
+    if ! echo "$current_backup_dir" >> "$BACKUP_DIR_BASE/manifest.log"; then
+        log_error "Failed to update backup manifest '$BACKUP_DIR_BASE/manifest.log'."
+        exit 1
+    fi
+    log_info "Backup directory '$current_backup_dir' recorded in manifest."
+}
+
 # --- Core Logic Functions ---
 
 _setup() {
     log_info "Executing setup process..."
     _detect_os
+    _manage_dotfiles
     log_warn "Setup logic not yet implemented."
 }
 
