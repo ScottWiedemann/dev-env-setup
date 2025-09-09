@@ -217,8 +217,17 @@ _setup_git_ssh() {
 
     if ! pgrep "ssh-agent" > /dev/null 2>&1; then
         log_info "SSH agent not running, starting it."
-        eval "$(ssh-agent -s)" || log_error "Failed to start ssh-agent." && exit 1
-        log_info "SSH agent started."
+        local agent_output
+        agent_output=$(ssh-agent -s)
+        if ! eval "$agent_output"; then
+            log_error "Failed to execute ssh-agent output. This might be a shell compatibility issue."
+            exit 1
+        fi
+        if [ -z "$SSH_AUTH_SOCK" ]; then
+            log_error "SSH agent started, but SSH_AUTH_SOCK environment variable was not set. SSH may not function."
+            exit 1
+        fi
+        log_info "SSH agent started and environment variables set."
     else
         log_info "SSH agent already running."
     fi
