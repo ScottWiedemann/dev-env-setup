@@ -16,6 +16,7 @@ OS_NAME=""
 PACKAGE_MANAGER_CMD=""
 DISTRO_ID=""
 IS_TERMUX=false
+PACKAGE_MANIFEST="$HOME/.package_manifest.log" # File to track packages installed by this script
 
 # --- Helper Functions ---
 
@@ -34,6 +35,7 @@ log_error() {
 check_command() {
     if ! command -v "$1" &> /dev/null; then
         log_error "'$1' is not installed. Please install it to proceed."
+        exit 1
     fi
     log_info "'$1' command found."
 }
@@ -89,7 +91,7 @@ _restore_item() {
         fi
 
         if ! mv "$backup_source_path" "$restore_target_path"; then
-          log_error "Failed to move '$backup_source_path' to '$restore_target_path'." 
+          log_error "Failed to move '$backup_source_path' to '$restore_target_path'."
           exit 1
         fi
         log_info "Restored '$restore_target_path'."
@@ -113,7 +115,7 @@ _detect_os() {
         return
     fi
 
-    OS_NAME=$(uname -s) # e.g., Linux, Darwin
+    OS_NAME=$(uname -s)
 
     case "$OS_NAME" in
         Linux)
@@ -170,6 +172,17 @@ _detect_os() {
     log_info "OS detection complete. Package manager: $PACKAGE_MANAGER_CMD"
 }
 
+# Function to get a list of dotfiles from the bare repo
+# Excludes the repo's own gitignore and any specific exclude patterns
+_get_repo_dotfiles() {
+    if [ ! -d "$DOTFILES_DIR" ]; then
+        log_error "Dotfiles bare repository '$DOTFILES_DIR' not found. Cannot list repo files."
+        exit 1
+    fi
+    git --git-dir="$DOTFILES_DIR" ls-tree -r main --name-only | \
+    grep -vE "^(\.git(ignore)?|\.mailmap|\.DS_Store|README\.md|LICENSE)$"
+}
+
 # --- Git SSH Setup Function ---
 _setup_git_ssh() {
     log_info "Setting up Git SSH authentication..."
@@ -202,7 +215,7 @@ _setup_git_ssh() {
 
     log_info "Ensuring SSH agent is running and key is loaded..."
 
-    if ! pgrep -q "ssh-agent"; then
+    if ! pgrep "ssh-agent" > /dev/null 2>&1; then
         log_info "SSH agent not running, starting it."
         eval "$(ssh-agent -s)" || log_error "Failed to start ssh-agent." && exit 1
         log_info "SSH agent started."
@@ -316,15 +329,214 @@ _takedown_dot_alias() {
     log_info "'dot' alias takedown complete."
 }
 
-# Function to get a list of dotfiles from the bare repo
-_get_repo_dotfiles() {
-    git --git-dir="$DOTFILES_DIR" ls-tree -r main --name-only | \
-    grep -vE "^(\.git(ignore)?|\.mailmap|\.DS_Store|README\.md|LICENSE)$"
+# --- Package Management Functions ---
+
+# Define arrays of packages to install
+CORE_PACKAGES=(
+    "git"
+    "curl"
+    "wget"
+    "unzip"
+    "build-essential" # For Debian/Ubuntu, provides gcc, make, etc.
+)
+
+NVIM_PACKAGES=(
+    "neovim"
+    "ripgrep" # For Neovim fuzzy finding
+    "fd-find" # For Neovim fuzzy finding
+)
+
+TMUX_PACKAGES=(
+    "tmux"
+)
+
+PYTHON_PACKAGES=(
+    "python3"
+    "python3-pip"
+)
+
+NODEJS_PACKAGES=(
+    "nodejs"
+    "npm"
+)
+
+GO_PACKAGES=(
+    "golang"
+)
+
+_update_package_manager() {
+    # Update package lists before installing (e.g., apt update, dnf makecache)
+    if [ "$DISTRO_ID" == "ubuntu" ] || [ "$DISTRO_ID" == "debian" ] || [ "$DISTRO_ID" == "pop" ]; then
+        log_info "Updating apt package lists..."
+        if ! sudo apt-get update; then
+            log_warn "Failed to update apt package lists. Installation might fail."
+        fi
+    elif [ "$DISTRO_ID" == "fedora" ] || [ "$DISTRO_ID" == "centos" ] || [ "$DISTRO_ID" == "rhel" ]; then
+        log_info "Updating dnf cache..."
+        if ! sudo dnf makecache; then
+            log_warn "Failed to update dnf cache. Installation might fail."
+        fi
+    elif [ "$DISTRO_ID" == "arch" ]; then
+        log_info "Synchronizing pacman databases..."
+        if ! sudo pacman -Sy --noconfirm; then
+            log_warn "Failed to synchronize pacman databases. Installation might fail."
+        fi
+    fi
 }
 
-# --- Dotfiles Management Function ---
+
+# Function to install a list of packages
+_install_packages() {
+    local package_list_name="$1"
+    local -n packages_to_install="$2" # Use nameref for dynamic array access
+
+    if [ ${#packages_to_install[@]} -eq 0 ]; then
+        log_info "No packages defined for '$package_list_name', skipping."
+        return 0
+    fi
+
+    log_info "Installing packages for '$package_list_name' using '$PACKAGE_MANAGER_CMD'..."
+
+    # Check if package manager exists
+    if [ "$PACKAGE_MANAGER_CMD" = "" ]; then
+        log_error "Package manager command is not set. Cannot install '$package_list_name'."
+        exit 1
+    fi
+
+    for package in "${packages_to_install[@]}"; do
+        log_info "Attempting to install: $package"
+        local is_installed=false
+        case "$DISTRO_ID" in
+            ubuntu|debian|pop)
+                if dpkg -s "$package" &> /dev/null; then is_installed=true; fi
+                ;;
+            fedora|centos|rhel)
+                if rpm -q "$package" &> /dev/null; then is_installed=true; fi
+                ;;
+            arch)
+                if pacman -Q "$package" &> /dev/null; then is_installed=true; fi
+                ;;
+            termux)
+                if pkg list-installed | grep -q "^$package/"; then is_installed=true; fi
+                ;;
+            Darwin) # Homebrew
+                if brew list "$package" &> /dev/null; then is_installed=true; fi
+                ;;
+        esac
+
+        if "$is_installed"; then
+            log_info "'$package' is already installed, skipping."
+        else
+            if confirm_action "Install '$package'?"; then
+                if ! eval "$PACKAGE_MANAGER_CMD" "$package"; then
+                    log_error "Failed to install '$package'. See above for details."
+                    exit 1
+                fi
+                log_info "'$package' installed."
+                if ! echo "$package" >> "$PACKAGE_MANIFEST"; then
+                    log_warn "Failed to record '$package' in package manifest. Takedown might be incomplete."
+                fi
+            else
+                log_warn "Skipping installation of '$package' as requested."
+            fi
+        fi
+    done
+
+    log_info "Package installation for '$package_list_name' complete."
+}
+
+# Function to uninstall packages from the manifest
+_uninstall_packages() {
+    log_info "Beginning package uninstallation from manifest..."
+
+    if [ ! -f "$PACKAGE_MANIFEST" ]; then
+        log_warn "Package manifest '$PACKAGE_MANIFEST' not found. Skipping package uninstallation."
+        return 0
+    fi
+
+    if ! confirm_action "Uninstall packages listed in '$PACKAGE_MANIFEST'? This will remove packages installed by this script."; then
+        log_info "Skipping package uninstallation from manifest as requested."
+        return 0
+    fi
+
+    log_info "Uninstalling packages from manifest..."
+    local uninstall_cmd=""
+    case "$DISTRO_ID" in
+        ubuntu|debian|pop)
+            uninstall_cmd="sudo apt-get purge -y"
+            ;;
+        fedora|centos|rhel)
+            uninstall_cmd="sudo dnf remove -y"
+            ;;
+        arch)
+            uninstall_cmd="sudo pacman -Rs --noconfirm"
+            ;;
+        termux)
+            uninstall_cmd="pkg uninstall -y"
+            ;;
+        Darwin) # Homebrew
+            uninstall_cmd="brew uninstall --force"
+            ;;
+        *)
+            log_error "Unsupported distro for uninstallation: $DISTRO_ID. Manual package cleanup may be required."
+            exit 1
+            ;;
+    esac
+
+    local packages_to_uninstall
+    # Read packages from manifest into an array, one per line
+    readarray -t packages_to_uninstall < "$PACKAGE_MANIFEST"
+
+    # Iterate in reverse order for better dependency handling
+    for (( i=${#packages_to_uninstall[@]}-1; i>=0; i-- )); do
+        local package="${packages_to_uninstall[i]}"
+        log_info "Attempting to uninstall: $package"
+        # Check if package is actually installed before trying to uninstall
+        local is_installed=false
+        case "$DISTRO_ID" in
+            ubuntu|debian|pop)
+                if dpkg -s "$package" &> /dev/null; then is_installed=true; fi
+                ;;
+            fedora|centos|rhel)
+                if rpm -q "$package" &> /dev/null; then is_installed=true; fi
+                ;;
+            arch)
+                if pacman -Q "$package" &> /dev/null; then is_installed=true; fi
+                ;;
+            termux)
+                if pkg list-installed | grep -q "^$package/"; then is_installed=true; fi
+                ;;
+            Darwin) # Homebrew
+                if brew list "$package" &> /dev/null; then is_installed=true; fi
+                ;;
+        esac
+
+        if "$is_installed"; then
+            if ! eval "$uninstall_cmd" "$package"; then
+                log_warn "Failed to uninstall '$package'. Manual removal may be required."
+            else
+                log_info "'$package' uninstalled successfully."
+            fi
+        else
+            log_info "'$package' not found as installed, skipping uninstallation."
+        fi
+    done
+    log_info "Package uninstallation from manifest complete."
+
+    if confirm_action "Delete the package manifest file '$PACKAGE_MANIFEST'? (Recommended)"; then
+        if ! rm -f "$PACKAGE_MANIFEST"; then
+            log_warn "Failed to delete package manifest. Manual removal may be required."
+        fi
+        log_info "Package manifest '$PACKAGE_MANIFEST' deleted."
+    else
+        log_info "Skipping deletion of package manifest '$PACKAGE_MANIFEST'."
+    fi
+}
+
+
+# --- Dotfiles Management Functions ---
 _manage_dotfiles_setup() {
-    log_info "Managing dotfiles from $DOTFILES_REPO..."
+    log_info "Setting up dotfiles from $DOTFILES_REPO..."
 
     local current_backup_dir="$BACKUP_DIR_BASE/$(date +%Y%m%d%H%M%S)"
     log_info "Current backup directory for this run: $current_backup_dir"
@@ -349,13 +561,13 @@ _manage_dotfiles_setup() {
     else
         log_info "Cloning dotfiles bare repository..."
         if ! git clone --bare "$DOTFILES_REPO" "$DOTFILES_DIR"; then
-            log_error "Failed to clone dotfiles repository."
+            log_error "Failed to clone dotfiles repository. Ensure SSH key is added to GitHub and repo URL is correct."
             exit 1
         fi
         log_info "Dotfiles bare repository cloned to $DOTFILES_DIR."
     fi
 
-    log_info "Configuring Git for bare repository..."
+    log_info "Configuring Git's status.showUntrackedFiles for the bare repository..."
     if ! git --git-dir="$DOTFILES_DIR" config status.showUntrackedFiles no; then
         log_error "Failed to configure Git with 'status.showUntrackedFiles no'."
         exit 1
@@ -365,7 +577,6 @@ _manage_dotfiles_setup() {
     log_info "Preparing to deploy dotfiles. Existing files will be backed up."
 
     while IFS= read -r dotfile; do
-        echo "$dotfile"
         local full_path="$HOME/$dotfile"
         local backup_path="$current_backup_dir/$dotfile"
 
@@ -399,6 +610,7 @@ _manage_dotfiles_setup() {
 
     _setup_dot_alias
 }
+
 
 _manage_dotfiles_takedown() {
     log_info "Beginning dotfiles takedown process..."
@@ -440,9 +652,8 @@ _manage_dotfiles_takedown() {
 
     if [ "$last_backup_dir" != "" ]; then
         log_info "Restoring original dotfiles from '$last_backup_dir'..."
-
         if find "$last_backup_dir" -type f -print0 | while IFS= read -r -d '' backup_file; do
-            local relative_path="${backup_file#$last_backup_dir/}"
+            local relative_path="${backup_file#"$last_backup_dir"/}"
             local original_path="$HOME/$relative_path"
             _restore_item "$backup_file" "$original_path"
         done; then
@@ -462,7 +673,6 @@ _manage_dotfiles_takedown() {
             log_error "Failed to restore some directories from '$last_backup_dir'."
             exit 1
         fi
-
         log_info "Original dotfiles restored from '$last_backup_dir'."
 
         if confirm_action "Delete the backup directory '$last_backup_dir'? (Recommended for clean takedown)"; then
@@ -471,7 +681,6 @@ _manage_dotfiles_takedown() {
                 log_error "Failed to remove backup directory '$last_backup_dir'."
                 exit 1
             fi
-
             if ! sed -i '$d' "$BACKUP_DIR_BASE/manifest.log"; then
                 log_warn "Failed to remove last entry from manifest.log. Manual cleanup may be required."
             fi
@@ -489,7 +698,6 @@ _manage_dotfiles_takedown() {
             log_error "Failed to remove dotfiles bare repository."
             exit 1
         fi
-
         if [ -f "$BACKUP_DIR_BASE/manifest.log" ] && [ ! -s "$BACKUP_DIR_BASE/manifest.log" ]; then
             if ! rm -f "$BACKUP_DIR_BASE/manifest.log"; then
                 log_warn "Failed to remove empty manifest.log."
@@ -503,27 +711,51 @@ _manage_dotfiles_takedown() {
     log_info "Dotfiles takedown complete."
 }
 
+
 # --- Core Logic Functions ---
 
 _setup() {
     log_info "Executing setup process..."
     _detect_os
+
+    if [ ! -f "$PACKAGE_MANIFEST" ]; then
+        if ! touch "$PACKAGE_MANIFEST"; then
+            log_error "Failed to create package manifest file '$PACKAGE_MANIFEST'."
+            exit 1
+        fi
+        log_info "Created empty package manifest file '$PACKAGE_MANIFEST'."
+    fi
+
+    _setup_git_ssh
     _manage_dotfiles_setup
-    log_warn "Setup logic not yet implemented."
+
+    # --- Package Installation during Setup ---
+    log_info "Beginning package installation..."
+    _update_package_manager
+    _install_packages "Core System Tools" "CORE_PACKAGES"
+    _install_packages "Neovim Tools" "NVIM_PACKAGES"
+    _install_packages "Tmux" "TMUX_PACKAGES"
+    _install_packages "Python" "PYTHON_PACKAGES"
+    _install_packages "Node.js" "NODEJS_PACKAGES"
+    _install_packages "Go" "GO_PACKAGES"
+    log_info "All primary package installations complete."
+
+    log_warn "Remaining setup logic (specific software configuration, e.g., NVM, pyenv) not yet implemented."
 }
 
 _takedown() {
     log_info "Executing takedown process..."
     _detect_os
+    _uninstall_packages
     _manage_dotfiles_takedown
-    log_warn "Takedown logic not yet implemented."
+    log_warn "Remaining takedown logic (de-configuration, e.g., NVM, pyenv) not yet implemented."
 }
 
 usage() {
-    echo "Usage: $0 [ --setup | --takedown ] [ --force ]"
-    echo "  --setup    : Run the setup process."
-    echo "  --takedown : Run the takedown process."
-    echo "  --force    : Run in non-interactive mode (auto-confirms all prompts)."
+    log_info "Usage: $0 [ --setup | --takedown ] [ --force ]"
+    log_info "  --setup    : Run the setup process."
+    log_info "  --takedown : Run the takedown process."
+    log_info "  --force    : Run in non-interactive mode (auto-confirms all prompts)."
     exit 1
 }
 
