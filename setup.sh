@@ -617,11 +617,6 @@ _manage_dotfiles_takedown() {
 
     _takedown_dot_alias
 
-    if [ ! -d "$DOTFILES_DIR" ]; then
-        log_warn "Dotfiles bare repository not found at '$DOTFILES_DIR'. Skipping dotfile takedown."
-        return 0
-    fi
-
     local last_backup_dir=""
     if [ -f "$BACKUP_DIR_BASE/manifest.log" ]; then
         last_backup_dir=$(tail -n 1 "$BACKUP_DIR_BASE/manifest.log")
@@ -663,16 +658,6 @@ _manage_dotfiles_takedown() {
             exit 1
         fi
 
-        if find "$last_backup_dir" -mindepth 1 -maxdepth 1 -type d -print0 | while IFS= read -r -d '' backup_dir; do
-            local relative_path="${backup_dir#$last_backup_dir/}"
-            local original_path="$HOME/$relative_path"
-            _restore_item "$backup_dir" "$original_path"
-        done; then
-            log_info "Directories restored successfully."
-        else
-            log_error "Failed to restore some directories from '$last_backup_dir'."
-            exit 1
-        fi
         log_info "Original dotfiles restored from '$last_backup_dir'."
 
         if confirm_action "Delete the backup directory '$last_backup_dir'? (Recommended for clean takedown)"; then
@@ -692,12 +677,14 @@ _manage_dotfiles_takedown() {
         log_warn "No valid backup directory found/specified for restoration. User-specific dotfiles in $HOME were removed, but no original files were restored."
     fi
 
+    # Final cleanup of the bare repository if no other backups depend on it or if explicitly chosen
     if confirm_action "Delete the dotfiles bare repository '$DOTFILES_DIR'? (Recommended for clean takedown)"; then
         log_info "Removing dotfiles bare repository '$DOTFILES_DIR'..."
         if ! rm -rf "$DOTFILES_DIR"; then
             log_error "Failed to remove dotfiles bare repository."
             exit 1
         fi
+        # If manifest is now empty, remove it too
         if [ -f "$BACKUP_DIR_BASE/manifest.log" ] && [ ! -s "$BACKUP_DIR_BASE/manifest.log" ]; then
             if ! rm -f "$BACKUP_DIR_BASE/manifest.log"; then
                 log_warn "Failed to remove empty manifest.log."
@@ -708,9 +695,18 @@ _manage_dotfiles_takedown() {
         log_info "Skipping deletion of dotfiles bare repository."
     fi
 
+    if confirm_action "The base backup directory '$BACKUP_DIR_BASE' is now empty. Delete it? (Recommended for clean takedown)"; then
+        log_info "Removing empty base backup directory '$BACKUP_DIR_BASE'..."
+        if ! rm -rf "$BACKUP_DIR_BASE"; then
+            log_warn "Failed to remove base backup directory '$BACKUP_DIR_BASE'. Manual cleanup may be required."
+        fi
+        log_info "Base backup directory '$BACKUP_DIR_BASE' removed."
+    else
+        log_info "Skipping deletion of empty base backup directory '$BACKUP_DIR_BASE'."
+    fi
+
     log_info "Dotfiles takedown complete."
 }
-
 
 # --- Core Logic Functions ---
 
